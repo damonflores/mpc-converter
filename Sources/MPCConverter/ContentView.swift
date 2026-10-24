@@ -49,6 +49,12 @@ struct ContentView: View {
         } isTargeted: { targeted in
             dropTargeted = targeted && model.acceptsDrops
         }
+        .task {
+            // Test hook used by the CI smoke test: MPC_AUTOLOAD=/path/to/folder
+            if let p = ProcessInfo.processInfo.environment["MPC_AUTOLOAD"] {
+                model.load([URL(fileURLWithPath: p)])
+            }
+        }
         .alert(item: $model.alert) { a in
             Alert(title: Text(a.title), message: Text(a.message), dismissButton: .default(Text("OK")))
         }

@@ -14,6 +14,19 @@ jobs:
         run: swift --version
       - name: Build app (universal)
         run: ./build.sh --universal
+      - name: Smoke test (launch app, auto-load a test library)
+        continue-on-error: true
+        run: |
+          mkdir -p logs
+          python3 scripts/make_test_library.py "$RUNNER_TEMP/Test Library" > logs/library.txt 2>&1
+          rm -f ~/Library/Logs/DiagnosticReports/MPCConverter* || true
+          MPC_AUTOLOAD="$RUNNER_TEMP/Test Library" "build/MPC Converter.app/Contents/MacOS/MPCConverter" > logs/app-output.txt 2>&1 &
+          PID=$!
+          sleep 25
+          if kill -0 $PID 2>/dev/null; then echo "ALIVE after 25s" > logs/result.txt; kill $PID; else wait $PID; echo "CRASHED exit=$?" > logs/result.txt; fi
+          sleep 5
+          cp ~/Library/Logs/DiagnosticReports/MPCConverter* logs/ 2>/dev/null || true
+          ls -la logs; cat logs/result.txt
       - name: Zip app
         run: |
           cd build
@@ -33,9 +46,11 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           cp MPC-Converter.zip /tmp/MPC-Converter.zip
+          cp -R logs /tmp/logs
           git checkout --orphan dist
           git rm -rf . >/dev/null
           cp /tmp/MPC-Converter.zip .
-          git add MPC-Converter.zip
+          cp -R /tmp/logs logs
+          git add MPC-Converter.zip logs
           git commit -m "Build ${{ github.run_number }}"
           git push -f origin dist
