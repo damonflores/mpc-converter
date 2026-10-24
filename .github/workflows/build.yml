@@ -18,11 +18,14 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p logs
+          brew install lame >/dev/null 2>&1 || true
           python3 scripts/make_test_library.py "$RUNNER_TEMP/Test Library" > logs/library.txt 2>&1
           rm -f ~/Library/Logs/DiagnosticReports/MPCConverter* || true
           MPC_AUTOLOAD="$RUNNER_TEMP/Test Library" "build/MPC Converter.app/Contents/MacOS/MPCConverter" > logs/app-output.txt 2>&1 &
           PID=$!
-          sleep 25
+          sleep 6;  screencapture -x logs/screen-06s.png || true
+          sleep 10; screencapture -x logs/screen-16s.png || true
+          sleep 9
           if kill -0 $PID 2>/dev/null; then echo "ALIVE after 25s" > logs/result.txt; kill $PID; else wait $PID; echo "CRASHED exit=$?" > logs/result.txt; fi
           sleep 5
           cp ~/Library/Logs/DiagnosticReports/MPCConverter* logs/ 2>/dev/null || true

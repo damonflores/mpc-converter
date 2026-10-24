@@ -53,3 +53,19 @@ with open(os.path.join(root, "readme.txt"), "w") as f:
 with open(os.path.join(root, "Kicks/broken.wav"), "wb") as f:
     f.write(b"RIFF\x00\x00garbage")
 print("library ready:", root)
+
+# Bulk: ~900 files across folders (several probe batches), plus MP3s if lame is available
+import shutil
+lame = shutil.which("lame")
+for i in range(880):
+    folder = ["Drums/Kicks", "Drums/Snares", "Drums/Hats", "Perc", "FX/Risers", "Loops"][i % 6]
+    rate = [44100, 48000, 96000, 22050][i % 4]
+    path = os.path.join(root, "Bulk", folder, f"Sample {i:03d}.wav")
+    wav(path, rate, [16, 24][i % 2], 1 + (i % 2), secs=0.05, freq=110 + i)
+    if lame and i % 30 == 0:
+        mp3 = path[:-4] + ".mp3"
+        subprocess.run([lame, "--quiet", "-b", "192", path, mp3])
+for i in range(250):
+    with open(os.path.join(root, "Bulk", f"notes {i}.txt"), "w") as f:
+        f.write("x")
+print("bulk done; lame:", bool(lame))
