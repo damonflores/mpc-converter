@@ -24,6 +24,12 @@ struct MPCConverterApp: App {
         .windowResizability(.contentMinSize)
         .defaultPosition(.center)
 
+        .commands {
+            CommandGroup(after: .help) {
+                Button("Show Log File") { Diagnostics.revealLog() }
+            }
+        }
+
         Settings {
             SettingsView()
                 .environmentObject(settings)
@@ -33,6 +39,14 @@ struct MPCConverterApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        Diagnostics.start()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Diagnostics.log("terminate")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Needed when launched via `swift run` (no bundle); harmless inside the .app.
         NSApp.setActivationPolicy(.regular)

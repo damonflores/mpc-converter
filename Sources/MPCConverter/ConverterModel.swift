@@ -21,9 +21,9 @@ final class ConverterModel: ObservableObject {
     @Published private(set) var canUndo = false
     @Published var tableSelection = Set<Int>()
     @Published var sortOrder: [KeyPathComparator<FileRow>] = [KeyPathComparator(\FileRow.path)] {
-        didSet { updateDisplayOrder() }
+        didSet { if sortOrder != oldValue { updateDisplayOrder() } }
     }
-    @Published var searchText = "" { didSet { updateDisplayOrder() } }
+    @Published var searchText = "" { didSet { if searchText != oldValue { updateDisplayOrder() } } }
     @Published var dryRunSummary: DryRunSummary?
     @Published var alert: AlertMessage?
     @Published var confirmUndo = false
@@ -75,6 +75,7 @@ final class ConverterModel: ObservableObject {
     func load(_ urls: [URL]) {
         let files = urls.filter(\.isFileURL)
         guard !files.isEmpty, acceptsDrops else { return }
+        Diagnostics.log("load: \(files.map(\.path))")
         probeTask?.cancel()
         generation += 1
         let token = generation
@@ -90,6 +91,7 @@ final class ConverterModel: ObservableObject {
                                           message: "MPC Converter reads WAV, AIFF, MP3, M4A/AAC, FLAC and CAF files.")
                 return
             }
+            Diagnostics.log("scan done: \(result.files.count) audio, \(result.unsupportedCount) non-audio")
             self.scan = result
             let prefixGroup = result.groups.count > 1
             self.rows = result.files.enumerated().map { i, f in

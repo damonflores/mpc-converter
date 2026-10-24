@@ -330,9 +330,11 @@ private struct FileTable: View {
     @EnvironmentObject var model: ConverterModel
 
     var body: some View {
-        Table(model.displayedRows, selection: $model.tableSelection, sortOrder: $model.sortOrder) {
+        let model = self.model   // resolve once; row cells and menus get a plain reference
+        Table(model.displayedRows, selection: self.$model.tableSelection, sortOrder: self.$model.sortOrder) {
             TableColumn("✓", value: \FileRow.includedSort) { (row: FileRow) in
-                CheckCell(id: row.id)
+                // Table rows don't inherit environment objects on newer macOS → pass the model explicitly.
+                CheckCell(model: model, id: row.id, included: row.included)
             }
             .width(28)
 
@@ -390,16 +392,16 @@ private struct FileTable: View {
 }
 
 private struct CheckCell: View {
-    @EnvironmentObject var model: ConverterModel
+    let model: ConverterModel       // plain reference, no environment lookup
     let id: Int
+    let included: Bool
 
     var body: some View {
         Toggle("", isOn: Binding(
-            get: { model.isIncluded(id) },
-            set: { model.setIncluded([id], $0) }))
+            get: { included },
+            set: { [model, id] newValue in model.setIncluded([id], newValue) }))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(model.isBusy)
     }
 }
 
