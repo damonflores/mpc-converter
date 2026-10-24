@@ -1,0 +1,23 @@
+name: Build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app || true
+          swift --version
+      - name: Build app (universal)
+        run: ./build.sh --universal
+      - name: Zip app
+        run: |
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent "MPC Converter.app" ../MPC-Converter.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MPC-Converter
+          path: MPC-Converter.zip
