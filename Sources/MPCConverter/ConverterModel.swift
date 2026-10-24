@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -6,23 +7,52 @@ import SwiftUI
 final class ConverterModel: ObservableObject {
     enum Phase: Equatable { case idle, scanning, ready, analyzing, converting, finished }
 
+    let settings: AppSettings
+
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var scan: LibraryScan?
+    @Published private(set) var rows: [FileRow] = []
+    @Published private(set) var displayOrder: [Int] = []
+    @Published private(set) var probing = false
     @Published private(set) var done = 0
     @Published private(set) var total = 0
     @Published private(set) var currentName = ""
     @Published private(set) var outcome: RunOutcome?
     @Published private(set) var canUndo = false
-    @Published var dryRun: DryRunReport?
+    @Published var tableSelection = Set<Int>()
+    @Published var sortOrder: [KeyPathComparator<FileRow>] = [KeyPathComparator(\FileRow.path)] {
+        didSet { updateDisplayOrder() }
+    }
+    @Published var searchText = "" { didSet { updateDisplayOrder() } }
+    @Published var dryRunSummary: DryRunSummary?
     @Published var alert: AlertMessage?
     @Published var confirmUndo = false
 
     private var engine: ConversionEngine?
+    private var probeTask: Task<Void, Never>?
+    private var generation = 0
+    private var refreshScheduled = false
+    private var cancellables = Set<AnyCancellable>()
+    private static let previewBase = URL(fileURLWithPath: "/MPC Converter Preview", isDirectory: true)
 
-    init() { canUndo = ManifestStore.load() != nil }
+    init(settings: AppSettings) {
+        self.settings = settings
+        canUndo = ManifestStore.load() != nil
+        settings.objectWillChange
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.scheduleRefresh() }
+            }
+            .store(in: &cancellables)
+    }
 
-    var canConvert: Bool { phase == .ready }
+    // MARK: Derived
+
+    var displayedRows: [FileRow] { displayOrder.compactMap { rows.indices.contains($0) ? rows[$0] : nil } }
+    var includedCount: Int { rows.reduce(0) { $0 + ($1.included ? 1 : 0) } }
+    var includedBytes: Int64 { rows.reduce(0) { $0 + ($1.included ? $1.size : 0) } }
+    var canConvert: Bool { phase == .ready && includedCount > 0 }
     var acceptsDrops: Bool { phase == .idle || phase == .ready || phase == .finished }
+    var isBusy: Bool { phase == .converting || phase == .analyzing || phase == .scanning }
 
     var undoSummary: String {
         guard let m = ManifestStore.load() else { return "" }
@@ -45,36 +75,165 @@ final class ConverterModel: ObservableObject {
     func load(_ urls: [URL]) {
         let files = urls.filter(\.isFileURL)
         guard !files.isEmpty, acceptsDrops else { return }
+        probeTask?.cancel()
+        generation += 1
+        let token = generation
         outcome = nil
+        dryRunSummary = nil
         phase = .scanning
         Task {
             let result = await Task.detached(priority: .userInitiated) { LibraryScanner.scan(files) }.value
+            guard token == self.generation else { return }
             if result.files.isEmpty {
-                self.scan = nil
-                self.phase = .idle
+                self.reset()
                 self.alert = AlertMessage(title: "No audio files found",
                                           message: "MPC Converter reads WAV, AIFF, MP3, M4A/AAC, FLAC and CAF files.")
-            } else {
-                self.scan = result
-                self.phase = .ready
+                return
             }
+            self.scan = result
+            let prefixGroup = result.groups.count > 1
+            self.rows = result.files.enumerated().map { i, f in
+                var parts = f.relativeDirs + [f.url.lastPathComponent]
+                if prefixGroup && result.groups[f.groupIndex].isFolder {
+                    parts.insert(result.groups[f.groupIndex].name, at: 0)
+                }
+                return FileRow(id: i, path: parts.joined(separator: "/"), size: f.size)
+            }
+            self.tableSelection = []
+            self.phase = .ready
+            self.refreshPreview()
+            self.startProbing(token: token)
         }
     }
 
-    func clear() {
+    private func reset() {
+        probeTask?.cancel()
         scan = nil
+        rows = []
+        displayOrder = []
+        tableSelection = []
         outcome = nil
+        dryRunSummary = nil
+        probing = false
         phase = .idle
+    }
+
+    func clear() {
+        generation += 1
+        reset()
     }
 
     func backToReady() {
         outcome = nil
+        for i in rows.indices { rows[i].status = .none }
         phase = scan == nil ? .idle : .ready
+    }
+
+    // MARK: Probing source formats (background, in batches)
+
+    private func startProbing(token: Int) {
+        guard let scan else { return }
+        let urls = scan.files.map(\.url)
+        probing = true
+        probeTask = Task {
+            let batch = 64
+            var start = 0
+            while start < urls.count {
+                let end = min(start + batch, urls.count)
+                let slice = Array(urls[start..<end])
+                let infos = await Task.detached(priority: .utility) { () -> [SourceFormatInfo?] in
+                    let box = ProbeBox(count: slice.count)
+                    DispatchQueue.concurrentPerform(iterations: slice.count) { i in
+                        box.set(i, AudioTranscoder.probe(slice[i]))
+                    }
+                    return box.items
+                }.value
+                if Task.isCancelled || token != self.generation { return }
+                for (offset, info) in infos.enumerated() {
+                    let i = start + offset
+                    if let info {
+                        self.rows[i].format = info.label
+                        self.rows[i].sampleRate = info.sampleRate
+                        self.rows[i].channels = info.channels
+                        self.rows[i].isLossy = info.isLossy
+                    } else {
+                        self.rows[i].format = "unreadable"
+                        self.rows[i].unreadable = true
+                    }
+                }
+                start = end
+                self.refreshPreview()
+            }
+            if token == self.generation { self.probing = false }
+        }
+    }
+
+    // MARK: Selection
+
+    func isIncluded(_ id: Int) -> Bool { rows.indices.contains(id) && rows[id].included }
+
+    func setIncluded<S: Sequence>(_ ids: S, _ value: Bool) where S.Element == Int {
+        guard phase == .ready || phase == .finished else { return }
+        for id in ids where rows.indices.contains(id) { rows[id].included = value }
+        dryRunSummary = nil
+        scheduleRefresh()
+    }
+
+    func setAllVisible(_ value: Bool) { setIncluded(displayOrder, value) }
+
+    // MARK: Preview (output names + notes), recomputed when settings or selection change
+
+    private func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        Task {
+            self.refreshScheduled = false
+            self.refreshPreview()
+        }
+    }
+
+    private func refreshPreview() {
+        guard let scan, phase != .converting else { return }
+        let options = settings.options
+        let include = Set(rows.lazy.filter(\.included).map(\.id))
+        let plan = Planner.makePlan(scan: scan, include: include, outputBase: Self.previewBase,
+                                    options: options, checkDisk: false)
+        var byFile: [Int: ConversionJob] = [:]
+        for job in plan.jobs { byFile[job.fileIndex] = job }
+
+        for i in rows.indices {
+            let job = byFile[i]
+            rows[i].output = job?.outputInFolder ?? "—"
+            var notes: [String] = []
+            let r = rows[i]
+            if r.unreadable {
+                notes.append("can't read")
+            } else {
+                if let sr = r.sampleRate, sr != ConversionOptions.targetSampleRate {
+                    notes.append("resample \(Self.khz(sr))→44.1")
+                }
+                if r.isLossy { notes.append("lossy") }
+                if options.strict && r.channels > 2 { notes.append("\(r.channels)ch→stereo") }
+            }
+            if job?.renamed == true { notes.append("renamed") }
+            rows[i].notes = notes.joined(separator: ", ")
+        }
+        updateDisplayOrder()
+    }
+
+    private func updateDisplayOrder() {
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        let filtered = q.isEmpty ? rows : rows.filter { $0.path.localizedCaseInsensitiveContains(q) }
+        displayOrder = filtered.sorted(using: sortOrder).map(\.id)
+    }
+
+    private static func khz(_ sr: Double) -> String {
+        sr.truncatingRemainder(dividingBy: 1000) == 0 ? "\(Int(sr / 1000))k" : String(format: "%.1fk", sr / 1000)
     }
 
     // MARK: Output location
 
-    private func resolveOutputBase(_ settings: AppSettings, scan: LibraryScan, interactive: Bool) -> URL? {
+    private func resolveOutputBase(scan: LibraryScan, interactive: Bool) -> URL? {
         switch settings.saveMode {
         case .askEachTime:
             guard interactive else { return nil }
@@ -107,19 +266,22 @@ final class ConverterModel: ObservableObject {
 
     // MARK: Convert
 
-    func convertAll(_ settings: AppSettings) {
-        guard let scan, phase == .ready else { return }
+    func convertAll() {
+        guard let scan, canConvert else { return }
         let options = settings.options
-        guard let base = resolveOutputBase(settings, scan: scan, interactive: true) else { return }
+        let include = Set(rows.lazy.filter(\.included).map(\.id))
+        guard let base = resolveOutputBase(scan: scan, interactive: true) else { return }
 
+        dryRunSummary = nil
+        for i in rows.indices { rows[i].status = .none }
         phase = .analyzing
         Task {
             let plan = await Task.detached(priority: .userInitiated) {
-                Planner.makePlan(scan: scan, outputBase: base, options: options, checkDisk: true)
+                Planner.makePlan(scan: scan, include: include, outputBase: base, options: options, checkDisk: true)
             }.value
             guard !plan.jobs.isEmpty else {
                 self.phase = .ready
-                self.alert = AlertMessage(title: "Nothing to convert", message: "No audio files left after filtering.")
+                self.alert = AlertMessage(title: "Nothing to convert", message: "No files are selected.")
                 return
             }
 
@@ -127,6 +289,7 @@ final class ConverterModel: ObservableObject {
             self.done = 0
             self.currentName = ""
             self.phase = .converting
+            let jobToFile = plan.jobs.map(\.fileIndex)
 
             let engine = ConversionEngine()
             self.engine = engine
@@ -134,6 +297,12 @@ final class ConverterModel: ObservableObject {
                 Task { @MainActor in
                     self.done += 1
                     self.currentName = result.name
+                    let fi = jobToFile[result.jobID]
+                    switch result.status {
+                    case .converted: self.rows[fi].status = .converted
+                    case .failed(let msg): self.rows[fi].status = .failed(msg)
+                    case .cancelled: self.rows[fi].status = .cancelled
+                    }
                 }
             }
             self.engine = nil
@@ -158,31 +327,32 @@ final class ConverterModel: ObservableObject {
 
     // MARK: Dry run
 
-    func runDryRun(_ settings: AppSettings) {
-        guard let scan, phase == .ready else { return }
-        let options = settings.options
-        let base: URL
-        let checkDisk: Bool
-        let label: String
-        if settings.saveMode == .askEachTime {
-            base = URL(fileURLWithPath: "/MPC Converter Preview", isDirectory: true)
-            checkDisk = false
-            label = "Output folder (asked when you convert)"
-        } else {
-            guard let b = resolveOutputBase(settings, scan: scan, interactive: false) else { return }
-            base = b
-            checkDisk = true
-            label = b.path
-        }
-
+    func runDryRun() {
+        guard let scan, canConvert else { return }
         phase = .analyzing
         Task {
-            let report = await Task.detached(priority: .userInitiated) { () -> DryRunReport in
-                let plan = Planner.makePlan(scan: scan, outputBase: base, options: options, checkDisk: checkDisk)
-                return DryRunBuilder.build(plan: plan, scan: scan, options: options, destinationLabel: label)
-            }.value
+            await self.probeTask?.value
             self.phase = .ready
-            self.dryRun = report
+            self.refreshPreview()
+            let included = self.rows.filter(\.included)
+            let depths = self.settings.options.bitDepths
+            let resample = included.filter { ($0.sampleRate ?? 44_100) != 44_100 }.count
+            let lossy = included.filter(\.isLossy).count
+            let renamed = included.filter { $0.notes.contains("renamed") }.count
+            let unreadable = included.filter(\.unreadable).count
+            let destination: String
+            switch self.settings.saveMode {
+            case .askEachTime: destination = "asked when you convert"
+            case .nextToSource:
+                destination = scan.groups[0].isFolder ? scan.groups[0].root.deletingLastPathComponent().path : scan.groups[0].root.path
+            case .fixedFolder: destination = self.settings.fixedFolderPath.isEmpty ? "not set" : self.settings.fixedFolderPath
+            }
+            var parts = ["\(included.count) files → \(included.count * depths.count) WAVs ("
+                         + depths.map { "\($0)-bit" }.joined(separator: " + ") + ")",
+                         "\(resample) to resample", "\(lossy) lossy", "\(renamed) renamed"]
+            if unreadable > 0 { parts.append("\(unreadable) unreadable — will fail") }
+            self.dryRunSummary = DryRunSummary(
+                text: "Dry run, nothing written: " + parts.joined(separator: " · ") + ". Destination: \(destination).")
         }
     }
 
@@ -210,45 +380,4 @@ private final class ProbeBox: @unchecked Sendable {
     init(count: Int) { storage = Array(repeating: nil, count: count) }
     func set(_ i: Int, _ v: SourceFormatInfo?) { lock.lock(); storage[i] = v; lock.unlock() }
     var items: [SourceFormatInfo?] { lock.lock(); defer { lock.unlock() }; return storage }
-}
-
-enum DryRunBuilder {
-    static func build(plan: Plan, scan: LibraryScan, options: ConversionOptions, destinationLabel: String) -> DryRunReport {
-        let n = plan.jobs.count
-        let box = ProbeBox(count: n)
-        let jobs = plan.jobs
-        DispatchQueue.concurrentPerform(iterations: n) { i in
-            box.set(i, AudioTranscoder.probe(jobs[i].source))
-        }
-        let infos = box.items
-
-        var rows: [DryRunRow] = []
-        var renamed = 0, resample = 0, lossy = 0, unreadable = 0
-        for (i, job) in plan.jobs.enumerated() {
-            var notes: [String] = []
-            let fmt: String
-            if let info = infos[i] {
-                fmt = info.label
-                if info.sampleRate != ConversionOptions.targetSampleRate {
-                    resample += 1
-                    notes.append("resample → 44.1")
-                }
-                if info.isLossy { lossy += 1; notes.append("lossy source") }
-                if options.strict && info.channels > 2 { notes.append("\(info.channels)ch → stereo") }
-            } else {
-                fmt = "—"
-                unreadable += 1
-                notes.append("can't read — will fail")
-            }
-            if job.renamed { renamed += 1; notes.append("renamed") }
-            rows.append(DryRunRow(id: job.id, source: job.displaySource, sourceFormat: fmt,
-                                  output: job.displayOutput, notes: notes.joined(separator: ", ")))
-        }
-
-        return DryRunReport(rows: rows, destinationLabel: destinationLabel,
-                            outputFolderNames: plan.topFolders.map(\.lastPathComponent),
-                            wavsOut: plan.jobs.reduce(0) { $0 + $1.targets.count },
-                            renamed: renamed, needsResample: resample, lossy: lossy,
-                            unreadable: unreadable, unsupportedSkipped: scan.unsupportedCount)
-    }
 }

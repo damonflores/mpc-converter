@@ -115,11 +115,49 @@ struct OutputTarget: Sendable, Hashable {
 
 struct ConversionJob: Identifiable, Sendable {
     let id: Int
+    let fileIndex: Int
     let source: URL
     let displaySource: String
     let displayOutput: String
+    let outputInFolder: String
     let targets: [OutputTarget]
     let renamed: Bool
+}
+
+// MARK: - File list rows
+
+enum RowStatus: Sendable, Equatable {
+    case none, converted, failed(String), cancelled
+}
+
+struct FileRow: Identifiable, Sendable {
+    let id: Int                 // index into LibraryScan.files
+    let path: String
+    let size: Int64
+    var included = true
+    var format = "…"
+    var sampleRate: Double?
+    var channels = 0
+    var isLossy = false
+    var unreadable = false
+    var output = ""
+    var notes = ""
+    var status: RowStatus = .none
+
+    var includedSort: Int { included ? 0 : 1 }
+    var statusSort: Int {
+        switch status {
+        case .none: return 0
+        case .converted: return 1
+        case .cancelled: return 2
+        case .failed: return 3
+        }
+    }
+}
+
+struct DryRunSummary: Identifiable {
+    let id = UUID()
+    let text: String
 }
 
 struct Plan: Sendable {
@@ -157,29 +195,6 @@ struct RunOutcome: Sendable {
         results.compactMap { if case .failed(let msg) = $0.status { return ($0.displaySource, msg) }; return nil }
     }
     var filesWritten: [URL] { results.flatMap { $0.outputs } }
-}
-
-// MARK: - Dry run
-
-struct DryRunRow: Identifiable, Sendable {
-    let id: Int
-    let source: String
-    let sourceFormat: String
-    let output: String
-    let notes: String
-}
-
-struct DryRunReport: Identifiable, Sendable {
-    let id = UUID()
-    let rows: [DryRunRow]
-    let destinationLabel: String
-    let outputFolderNames: [String]
-    let wavsOut: Int
-    let renamed: Int
-    let needsResample: Int
-    let lossy: Int
-    let unreadable: Int
-    let unsupportedSkipped: Int
 }
 
 struct AlertMessage: Identifiable {

@@ -4,8 +4,14 @@ import SwiftUI
 @main
 struct MPCConverterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var settings = AppSettings()
-    @StateObject private var model = ConverterModel()
+    @StateObject private var settings: AppSettings
+    @StateObject private var model: ConverterModel
+
+    init() {
+        let s = AppSettings()
+        _settings = StateObject(wrappedValue: s)
+        _model = StateObject(wrappedValue: ConverterModel(settings: s))
+    }
 
     var body: some Scene {
         Window("MPC Converter", id: "main") {
@@ -14,7 +20,8 @@ struct MPCConverterApp: App {
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
         }
-        .windowResizability(.contentSize)
+        .defaultSize(width: 1080, height: 780)
+        .windowResizability(.contentMinSize)
         .defaultPosition(.center)
 
         Settings {

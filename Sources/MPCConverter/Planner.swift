@@ -4,7 +4,8 @@ enum Planner {
     /// Map every scanned source file to its output WAV path(s).
     /// Output layout:  <outputBase>/<Folder> - 16-bit/<same subfolders>/<name>.wav
     /// Top-level folders never overwrite anything: an existing name gets " 2", " 3"…
-    static func makePlan(scan: LibraryScan, outputBase: URL, options: ConversionOptions, checkDisk: Bool) -> Plan {
+    static func makePlan(scan: LibraryScan, include: Set<Int>? = nil, outputBase: URL,
+                         options: ConversionOptions, checkDisk: Bool) -> Plan {
         let fm = FileManager.default
         let base = outputBase.standardizedFileURL
         var claimedTop = Set<String>()
@@ -36,7 +37,8 @@ enum Planner {
         var jobs: [ConversionJob] = []
         let useFileSanitizer = options.sanitizeFilenames || options.strict
 
-        for f in scan.files {
+        for (fileIndex, f) in scan.files.enumerated() {
+            if let include, !include.contains(fileIndex) { continue }
             let g = scan.groups[f.groupIndex]
             // If the output folder sits inside the source folder, don't re-convert earlier output.
             if g.isFolder, isDescendant(base, of: g.root), isDescendant(f.url, of: base) { continue }
@@ -69,9 +71,10 @@ enum Planner {
             let firstTop = topURLs[f.groupIndex][options.bitDepths[0]]?.lastPathComponent ?? ""
             let displayOutput = ([firstTop] + relDirs + [fileName]).joined(separator: "/")
 
-            jobs.append(ConversionJob(id: jobs.count, source: f.url, displaySource: displaySource,
-                                      displayOutput: displayOutput, targets: targets,
-                                      renamed: finalStem != originalStem))
+            jobs.append(ConversionJob(id: jobs.count, fileIndex: fileIndex, source: f.url,
+                                      displaySource: displaySource, displayOutput: displayOutput,
+                                      outputInFolder: (relDirs + [fileName]).joined(separator: "/"),
+                                      targets: targets, renamed: finalStem != originalStem))
         }
 
         return Plan(jobs: jobs, directories: Array(dirSet), topFolders: topFolders)
