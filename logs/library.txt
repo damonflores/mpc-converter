@@ -1,0 +1,7 @@
+Converted/kick.m4a ok
+Converted/kick.aif ok
+Converted/kick.caf ok
+Converted/kick.flac ok
+Converted/kick alac.m4a ok
+library ready: /Users/runner/work/_temp/Test Library
+bulk done; lame: True
